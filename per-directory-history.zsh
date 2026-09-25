@@ -99,44 +99,47 @@ bindkey "$PER_DIRECTORY_HISTORY_TOGGLE" per-directory-history-toggle-history
 # percent sign is escaped first, so the encoding cannot introduce an
 # ambiguity; spaces and other characters are consequently safe as well.
 function _per-directory-history-file() {
-  local directory=${1:A}
-  local legacy="$HISTORY_BASE${directory}/history"
-  local encoded=${directory//\%/%25}
-  encoded=${encoded//\//%2F}
-  local encoded_file="$HISTORY_BASE/.history/$encoded"
-  local existing_parent=${legacy:h}
-
-  # If an old history file is an ancestor of the legacy parent, mkdir cannot
-  # create the legacy path.  Walk to the nearest existing ancestor so this
-  # also works for nested paths below a directory named history.
-  while [[ ! -e $existing_parent && $existing_parent != ${existing_parent:h} ]]; do
-    existing_parent=${existing_parent:h}
-  done
-
-  # Once a directory has used the encoded layout, keep using it even if the
-  # physical collision later disappears.  If both layouts exist, the encoded
-  # file wins so history cannot silently switch locations and orphan data.
-  if [[ -f $encoded_file ]]; then
-    REPLY=$encoded_file
-    return
-  fi
-
-  # Existing legacy files are preferred when no encoded history exists.  This
-  # avoids silently abandoning a user's existing history on upgrade.
-  if [[ -f $legacy && -d ${legacy:h} ]]; then
-    REPLY=$legacy
-    return
-  fi
-
-  # A directory named history needs the encoded layout.  Its parent may have
-  # an old history file at exactly the path needed as the child's directory;
-  # checking the legacy parent also handles arbitrary nesting of such paths.
-  if [[ ${directory:t} == history || -d "$directory/history" ||
-        ( -e $existing_parent && ! -d $existing_parent ) ]]; then
-    REPLY=$encoded_file
-  else
-    REPLY=$legacy
-  fi
+#  local directory=${1:A}
+#  local legacy="$HISTORY_BASE${directory}/history"
+#  local encoded=${directory//\%/%25}
+#  encoded=${encoded//\//%2F}
+#  local encoded_file="$HISTORY_BASE/.history/$encoded"
+#  local existing_parent=${legacy:h}
+#
+#  # If an old history file is an ancestor of the legacy parent, mkdir cannot
+#  # create the legacy path.  Walk to the nearest existing ancestor so this
+#  # also works for nested paths below a directory named history.
+#  while [[ ! -e $existing_parent && $existing_parent != ${existing_parent:h} ]]; do
+#    existing_parent=${existing_parent:h}
+#  done
+#
+#  # Once a directory has used the encoded layout, keep using it even if the
+#  # physical collision later disappears.  If both layouts exist, the encoded
+#  # file wins so history cannot silently switch locations and orphan data.
+#  if [[ -f $encoded_file ]]; then
+#    REPLY=$encoded_file
+#    return
+#  fi
+#
+#  # Existing legacy files are preferred when no encoded history exists.  This
+#  # avoids silently abandoning a user's existing history on upgrade.
+#  if [[ -f $legacy && -d ${legacy:h} ]]; then
+#    REPLY=$legacy
+#    return
+#  fi
+#
+#  # A directory named history needs the encoded layout.  Its parent may have
+#  # an old history file at exactly the path needed as the child's directory;
+#  # checking the legacy parent also handles arbitrary nesting of such paths.
+#  if [[ ${directory:t} == history || -d "$directory/history" ||
+#        ( -e $existing_parent && ! -d $existing_parent ) ]]; then
+#    REPLY=$encoded_file
+#  else
+#    REPLY=$legacy
+#  fi
+#
+#  We want to use history_file in CWD
+  REPLY="${PWD:A}/.local_zsh_history"
 }
 
 _per-directory-history-file "$PWD"
@@ -312,57 +315,108 @@ function _per-directory-history-cache-literal-limits() {
   (( savehist > 0 )) &&
     _per_directory_history_active_savehist=$savehist
 }
-
-function _per-directory-history-change-directory() {
-  local target
-  _per-directory-history-file "$PWD"
-  target=$REPLY
-  mkdir -p "${target:h}"
-  if [[ $_per_directory_history_is_global == false ]]; then
-    _per-directory-history-switch-context "$target"
-  fi
-  _per_directory_history_directory=$target
+# This was suggested by co-pilot instead of original function
+function _per-directory-history-change-directory () {
+    local previous_local=""
+ 
+    if [[ -n "$OLDPWD" ]]; then
+        previous_local="${OLDPWD:A}/.local_zsh_history"
+    fi
+ 
+    # Flush the history of the directory we are leaving.
+    if [[ $_per_directory_history_is_global == false ]]; then
+        fc -AI "$previous_local"
+    else
+        fc -AI "$HISTFILE"
+    fi
+ 
+    _per_directory_history_directory="${PWD:A}/.local_zsh_history"
+ 
+    # Clear the in-memory history before loading the selected one.
+    local original_histsize=$HISTSIZE
+    HISTSIZE=0
+    HISTSIZE=$original_histsize
+ 
+    if [[ -f "$_per_directory_history_directory" ]]; then
+        fc -R "$_per_directory_history_directory"
+        _per_directory_history_is_global=false
+    else
+        if [[ -e "$HISTFILE" ]]; then
+            fc -R "$HISTFILE"
+        fi
+        _per_directory_history_is_global=true
+    fi
 }
 
-function _per-directory-history-addhistory() {
-  setopt local_options no_ksh_arrays
+#function _per-directory-history-change-directory() {
+#  local target
+#  _per-directory-history-file "$PWD"
+#  target=$REPLY
+#  mkdir -p "${target:h}"
+#  if [[ $_per_directory_history_is_global == false ]]; then
+#    _per-directory-history-switch-context "$target"
+#  fi
+#  _per_directory_history_directory=$target
+#}
 
-  local command="${1%%$'\n'}"
-
-  # Keep the active context's limits available after zsh saves and pops that
-  # context on exit, restoring the protected base context with SAVEHIST=0.
-  (( HISTSIZE > 0 )) && _per_directory_history_active_histsize=$HISTSIZE
-  (( SAVEHIST > 0 )) && _per_directory_history_active_savehist=$SAVEHIST
-  _per-directory-history-cache-literal-limits "$command"
-
-  [[ -z "$command" ]] && return 0
-
-  # respect hist_ignore_space
-  if [[ -o hist_ignore_space ]] && [[ "$command" == \ * ]]; then
-      true
-  else
-      print -Sr -- "$command"
-      local inactive_history
-      if [[ $_per_directory_history_is_global == true ]]; then
-        inactive_history=$_per_directory_history_directory
-      else
-        inactive_history=$_per_directory_history_global_history
-      fi
-      # Incremental modes write both contexts now.  Otherwise retain a copy
-      # for the inactive context until the next switch or normal shell exit.
-      if [[ ! -o share_history &&
-            ! -o inc_append_history &&
-            ! -o inc_append_history_time ]]; then
-        _per_directory_history_pending_commands+=("$command")
-        _per_directory_history_pending_histories+=("$inactive_history")
-      elif [[ -o share_history ]] || \
-         [[ -o inc_append_history ]] || \
-         [[ -o inc_append_history_time ]]; then
-          fc -AI "$HISTFILE"
-      fi
-      fc -p "$inactive_history"
-  fi
+function _per-directory-history-addhistory () {
+    if [[ -o hist_ignore_space ]] && [[ "$1" == \ * ]]; then
+        true
+    else
+        print -Sr -- "${1%%$'\n'}"
+ 
+        if [[ -o share_history ]] ||
+           [[ -o inc_append_history ]] ||
+           [[ -o inc_append_history_time ]]; then
+ 
+            if [[ $_per_directory_history_is_global == true ]]; then
+                fc -AI "$HISTFILE"
+            else
+                fc -AI "$_per_directory_history_directory"
+            fi
+        fi
+    fi
 }
+
+#function _per-directory-history-addhistory() {
+#  setopt local_options no_ksh_arrays
+#
+#  local command="${1%%$'\n'}"
+#
+#  # Keep the active context's limits available after zsh saves and pops that
+#  # context on exit, restoring the protected base context with SAVEHIST=0.
+#  (( HISTSIZE > 0 )) && _per_directory_history_active_histsize=$HISTSIZE
+#  (( SAVEHIST > 0 )) && _per_directory_history_active_savehist=$SAVEHIST
+#  _per-directory-history-cache-literal-limits "$command"
+#
+#  [[ -z "$command" ]] && return 0
+#
+#  # respect hist_ignore_space
+#  if [[ -o hist_ignore_space ]] && [[ "$command" == \ * ]]; then
+#      true
+#  else
+#      print -Sr -- "$command"
+#      local inactive_history
+#      if [[ $_per_directory_history_is_global == true ]]; then
+#        inactive_history=$_per_directory_history_directory
+#      else
+#        inactive_history=$_per_directory_history_global_history
+#      fi
+#      # Incremental modes write both contexts now.  Otherwise retain a copy
+#      # for the inactive context until the next switch or normal shell exit.
+#      if [[ ! -o share_history &&
+#            ! -o inc_append_history &&
+#            ! -o inc_append_history_time ]]; then
+#        _per_directory_history_pending_commands+=("$command")
+#        _per_directory_history_pending_histories+=("$inactive_history")
+#      elif [[ -o share_history ]] || \
+#         [[ -o inc_append_history ]] || \
+#         [[ -o inc_append_history_time ]]; then
+#          fc -AI "$HISTFILE"
+#      fi
+#      fc -p "$inactive_history"
+#  fi
+#}
 
 function _per-directory-history-exit() {
   setopt local_options no_ksh_arrays
@@ -376,27 +430,44 @@ function _per-directory-history-exit() {
   fi
 }
 
-function _per-directory-history-precmd() {
-  if [[ $_per_directory_history_initialized == false ]]; then
-    _per_directory_history_initialized=true
-
-    if [[ $HISTORY_START_WITH_GLOBAL == true ]]; then
-      _per-directory-history-set-global-history
-      _per_directory_history_is_global=true
-    else
-      _per-directory-history-set-directory-history
-      _per_directory_history_is_global=false
+#function _per-directory-history-precmd() {
+#  if [[ $_per_directory_history_initialized == false ]]; then
+#    _per_directory_history_initialized=true
+#
+#    if [[ $HISTORY_START_WITH_GLOBAL == true ]]; then
+#      _per-directory-history-set-global-history
+#      _per_directory_history_is_global=true
+#    else
+#      _per-directory-history-set-directory-history
+#      _per_directory_history_is_global=false
+#    fi
+#  else
+#    # precmd observes limit changes made by the command that just completed;
+#    # zshaddhistory runs before that command and cannot see them yet.
+#    (( HISTSIZE > 0 )) && _per_directory_history_active_histsize=$HISTSIZE
+#    (( SAVEHIST > 0 )) && _per_directory_history_active_savehist=$SAVEHIST
+#
+#    # The preexec hook recorded the file after this shell appended its command,
+#    # so a change here came from another shell while the command was running.
+#    _per-directory-history-import-file-changes
+#  fi
+#}
+#
+# Co-pilot's suggestion for function
+function _per-directory-history-precmd () {
+    if [[ $_per_directory_history_initialized == false ]]; then
+        _per_directory_history_initialized=true
+ 
+        _per_directory_history_directory="${PWD:A}/.local_zsh_history"
+ 
+        if [[ -f "$_per_directory_history_directory" ]]; then
+            _per-directory-history-set-directory-history
+            _per_directory_history_is_global=false
+        else
+            _per-directory-history-set-global-history
+            _per_directory_history_is_global=true
+        fi
     fi
-  else
-    # precmd observes limit changes made by the command that just completed;
-    # zshaddhistory runs before that command and cannot see them yet.
-    (( HISTSIZE > 0 )) && _per_directory_history_active_histsize=$HISTSIZE
-    (( SAVEHIST > 0 )) && _per_directory_history_active_savehist=$SAVEHIST
-
-    # The preexec hook recorded the file after this shell appended its command,
-    # so a change here came from another shell while the command was running.
-    _per-directory-history-import-file-changes
-  fi
 }
 
 function _per-directory-history-preexec() {
