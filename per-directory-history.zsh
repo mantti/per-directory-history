@@ -463,9 +463,13 @@ function _per-directory-history-precmd () {
         if [[ -f "$_per_directory_history_directory" ]]; then
             _per-directory-history-set-directory-history
             _per_directory_history_is_global=false
+            zle -I
+            echo "using local ZSH command history"
         else
             _per-directory-history-set-global-history
             _per_directory_history_is_global=true
+            zle -I
+            echo "using global ZSH command history"
         fi
     fi
 }
